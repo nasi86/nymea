@@ -138,6 +138,33 @@ async def test_form_link_step(hass: HomeAssistant, mock_maveo_box) -> None:
     }
 
 
+async def test_form_link_step_timeout_shows_error(hass: HomeAssistant, mock_maveo_box) -> None:
+    """Test timeout during pairing returns to link form with error."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+
+    mock_maveo_box.init_connection = AsyncMock(side_effect=TimeoutError)
+
+    with patch(
+        "custom_components.nymea.config_flow.MaveoBox",
+        return_value=mock_maveo_box,
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_HOST: "192.168.2.179",
+                CONF_PORT: 2222,
+                CONF_WEBSOCKET_PORT: 4444,
+            },
+        )
+        result3 = await hass.config_entries.flow.async_configure(result2["flow_id"], {})
+
+    assert result3["type"] == FlowResultType.FORM
+    assert result3["step_id"] == "link"
+    assert result3["errors"] == {"base": "cannot_connect"}
+
+
 async def test_zeroconf_discovery(hass: HomeAssistant, mock_maveo_box) -> None:
     """Test zeroconf discovery."""
     discovery_info = zeroconf.ZeroconfServiceInfo(

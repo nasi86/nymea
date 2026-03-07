@@ -172,7 +172,19 @@ class NymeaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.data[CONF_PORT],
             websocket_port=self.data.get(CONF_WEBSOCKET_PORT, 4444)
         )
-        token: str | None = await box.init_connection()
+        try:
+            token: str | None = await box.init_connection()
+        except TimeoutError:
+            _LOGGER.warning(
+                "Pairing timed out for %s:%s",
+                self.data.get(CONF_HOST),
+                self.data.get(CONF_PORT),
+            )
+            return self.async_show_form(step_id="link", errors={"base": "cannot_connect"})
+        except Exception:
+            _LOGGER.exception("Pairing failed")
+            return self.async_show_form(step_id="link", errors={"base": "cannot_connect"})
+
         self.data[CONF_TOKEN] = token
 
         return self.async_create_entry(
