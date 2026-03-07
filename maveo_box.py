@@ -10,6 +10,7 @@ import logging
 import socket
 import ssl
 from threading import Lock
+import time
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -50,6 +51,8 @@ class MaveoBox:
 
         # JSON-RPC socket for commands (port 2222)
         self._sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket_timeout: float = 10.0
+        self._pairing_timeout: float = 35.0
 
         # WebSocket connection for notifications (port 4444)
         self._ws: Any = None
@@ -94,31 +97,23 @@ class MaveoBox:
 
     async def init_connection(self) -> str | None:
         """Inits the connection to the maveo box and returns a token used for authentication."""
-        # Run blocking socket operations in executor
         loop = self._hass.loop
 
-        # Connect to socket in executor (blocking I/O)
-        await loop.run_in_executor(None, self._sock.connect, (self._host, self._port))
+        await loop.run_in_executor(None, self._connect_socket)
 
         # Perform initial handshake
         try:
             # first try without ssl
-            handshake_message = self.send_command("JSONRPC.Hello", {})
+            handshake_message = await loop.run_in_executor(
+                None, self.send_command, "JSONRPC.Hello", {}
+            )
         except Exception:
             # on case of error try with ssl
-            # Create SSL context in executor to avoid blocking
             context = await loop.run_in_executor(None, self._create_ssl_context)
-
-            self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            await loop.run_in_executor(
-                None, self._sock.connect, (self._host, self._port)
+            await loop.run_in_executor(None, self._connect_socket, context)
+            handshake_message = await loop.run_in_executor(
+                None, self.send_command, "JSONRPC.Hello", {}
             )
-
-            # Wrap socket with SSL in executor
-            self._sock = await loop.run_in_executor(
-                None, context.wrap_socket, self._sock
-            )
-            handshake_message = self.send_command("JSONRPC.Hello", {})
 
         handshake_data = handshake_message["params"]
 
@@ -145,7 +140,7 @@ class MaveoBox:
 
         # Authenticate if no token
         if self._authenticationRequired and self._token is None:
-            self._token = self._pushbuttonAuthentication()
+            self._token = await loop.run_in_executor(None, self._pushbuttonAuthentication)
 
         # Enable notifications for the Integrations namespace
         self._enable_notifications()
@@ -155,6 +150,25 @@ class MaveoBox:
 
         return self._token
 
+    def _connect_socket(self, ssl_context: ssl.SSLContext | None = None) -> None:
+        """Create and connect the command socket with sane timeouts."""
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.settimeout(self._socket_timeout)
+        self._sock.connect((self._host, self._port))
+        if ssl_context is not None:
+            self._sock = ssl_context.wrap_socket(self._sock)
+            self._sock.settimeout(self._socket_timeout)
+
+    def _recv_json_line(self) -> dict[str, Any]:
+        """Receive one JSON line from the command socket."""
+        data = b""
+        while b"}\n" not in data:
+            chunk = self._sock.recv(4096)
+            if chunk == b"":
+                raise RuntimeError("socket connection broken")
+            data += chunk
+        return json.loads(data.decode("utf-8"))
+
     def _pushbuttonAuthentication(self) -> str | None:
         """Authenticate using push button method."""
         if self._token is not None:
@@ -162,9 +176,10 @@ class MaveoBox:
 
         _LOGGER.info("Using push button authentication method")
 
+        command_id = self._commandId
         params: dict[str, str] = {"deviceName": "home assistant"}
         command_obj: dict[str, Any] = {
-            "id": self._commandId,
+            "id": command_id,
             "params": params,
             "method": "JSONRPC.RequestPushButtonAuth",
         }
@@ -172,43 +187,37 @@ class MaveoBox:
         command = json.dumps(command_obj) + "\n"
         self._sock.send(command.encode("utf-8"))
 
-        # wait for the response with id = commandId
         response_id = -1
-        while response_id != self._commandId:
-            data = b""
-            while b"}\n" not in data:
-                chunk = self._sock.recv(4096)
-                if chunk == b"":
-                    raise RuntimeError("socket connection broken")
-                data += chunk
-
-            response = json.loads(data.decode("utf-8"))
+        while response_id != command_id:
+            response = self._recv_json_line()
+            if "notification" in response:
+                _LOGGER.debug(
+                    "Ignoring notification on command socket during auth init: %s",
+                    response["notification"],
+                )
+                continue
             response_id = response["id"]
 
-        self._commandId = self._commandId + 1
+        self._commandId = command_id + 1
 
-        # Check response.
         _LOGGER.info(
             "Initialized push button authentication, please press the pushbutton on the device"
         )
 
-        # wait for push button notification
-        while True:
-            data = b""
-            while b"}\n" not in data:
-                chunk = self._sock.recv(4096)
-                if chunk == b"":
-                    raise RuntimeError("socket connection broken")
-                data += chunk
-
-            response = json.loads(data.decode("utf-8"))
-            if ("notification" in response) and response[
-                "notification"
-            ] == "JSONRPC.PushButtonAuthFinished":
+        deadline = time.monotonic() + self._pairing_timeout
+        while time.monotonic() < deadline:
+            response = self._recv_json_line()
+            if (
+                ("notification" in response)
+                and response["notification"] == "JSONRPC.PushButtonAuthFinished"
+            ):
                 _LOGGER.info("Notification received")
-                if response["params"]["success"] is True:
+                if response["params"].get("success") is True:
                     _LOGGER.info("Authenticated successfully")
-                    return response["params"]["token"]
+                    return response["params"].get("token")
+                raise RuntimeError("push button authentication failed")
+
+        raise TimeoutError("push button authentication timed out")
 
     def _enable_notifications(self) -> None:
         """Enable notifications for relevant namespaces."""
@@ -239,15 +248,7 @@ class MaveoBox:
             # Wait for the response with id = commandId.
             responseId: int = -1
             while responseId != command_id:
-                data: bytes = b""
-
-                while b"}\n" not in data:
-                    chunk: bytes = self._sock.recv(4096)
-                    if chunk == b"":
-                        raise RuntimeError("socket connection broken")
-                    data += chunk
-
-                response: dict[str, Any] = json.loads(data.decode("utf-8"))
+                response: dict[str, Any] = self._recv_json_line()
                 # Skip notifications (should rarely happen on command socket now).
                 if "notification" in response:
                     _LOGGER.warning(
