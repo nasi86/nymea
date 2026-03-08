@@ -16,8 +16,6 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 import websockets
 
-# from .nymea import Nymea
-
 _LOGGER = logging.getLogger(__name__)
 
 mutex: Lock = Lock()
@@ -36,10 +34,8 @@ class MaveoBox:
     ) -> None:
         """Init maveo box."""
         self._host: str = host
-        self._port: int = port  # JSON-RPC port (typically 2222)
-        self._ws_port: int = (
-            websocket_port  # WebSocket port for notifications (typically 4444)
-        )
+        self._port: int = port
+        self._ws_port: int = websocket_port
         self._hass: HomeAssistant = hass
         self._name: str = host
         self._id: str = host.lower()
@@ -49,12 +45,10 @@ class MaveoBox:
         self._initialSetupRequired: bool = False
         self._commandId: int = 0
 
-        # JSON-RPC socket for commands (port 2222)
         self._sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._socket_timeout: float = 10.0
         self._pairing_timeout: float = 35.0
 
-        # WebSocket connection for notifications (port 4444)
         self._ws: Any = None
         self._ws_task: asyncio.Task[None] | None = None
 
@@ -62,11 +56,9 @@ class MaveoBox:
         self.things: list[Any] = []
         self.online: bool = True
 
-        # Thing classes data for dynamic entity generation
         self.thing_classes: list[dict[str, Any]] = []
         self.vendors: dict[str, dict[str, Any]] = {}
 
-        # Notification system
         self._notification_handlers: dict[
             str, list[Callable[[dict[str, Any]], None]]
         ] = {}
@@ -83,32 +75,40 @@ class MaveoBox:
             sock.settimeout(5)
             try:
                 sock.connect((self._host, self._port))
-                return True  # noqa: TRY300
+                return True
             except (TimeoutError, OSError):
                 return False
 
     def _create_ssl_context(self) -> ssl.SSLContext:
         """Create SSL context with self-signed certificate support."""
         context = ssl.create_default_context()
-        # As we are working with self signed certificates disable some cert checks.
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         return context
 
     async def init_connection(self) -> str | None:
-        """Inits the connection to the maveo box and returns a token used for authentication."""
+        """Init JSON-RPC connection and authenticate; WS is not required here."""
         loop = self._hass.loop
+        _LOGGER.debug(
+            "Initializing nymea connection to %s:%s (websocket_port configured as %s)",
+            self._host,
+            self._port,
+            self._ws_port,
+        )
 
         await loop.run_in_executor(None, self._connect_socket)
 
-        # Perform initial handshake
         try:
-            # first try without ssl
             handshake_message = await loop.run_in_executor(
                 None, self.send_command, "JSONRPC.Hello", {}
             )
-        except Exception:
-            # on case of error try with ssl
+        except Exception as ex:
+            _LOGGER.debug(
+                "Plain JSON-RPC handshake failed for %s:%s, retrying with SSL: %s",
+                self._host,
+                self._port,
+                ex,
+            )
             context = await loop.run_in_executor(None, self._create_ssl_context)
             await loop.run_in_executor(None, self._connect_socket, context)
             handshake_message = await loop.run_in_executor(
@@ -116,15 +116,24 @@ class MaveoBox:
             )
 
         handshake_data = handshake_message["params"]
-
         self._initialSetupRequired = handshake_data["initialSetupRequired"]
         self._authenticationRequired = handshake_data["authenticationRequired"]
         self._pushButtonAuthAvailable = handshake_data["pushButtonAuthAvailable"]
 
-        # If we don't need any authentication, we are done
+        _LOGGER.debug(
+            "Nymea hello for %s:%s -> auth_required=%s, initial_setup_required=%s, push_button_available=%s",
+            self._host,
+            self._port,
+            self._authenticationRequired,
+            self._initialSetupRequired,
+            self._pushButtonAuthAvailable,
+        )
+
         if not self._authenticationRequired:
             _LOGGER.warning(
-                "Maveo box is configured to allow unauthenticated requests, skipping authentication"
+                "Maveo box %s:%s allows unauthenticated requests; skipping authentication",
+                self._host,
+                self._port,
             )
             return None
 
@@ -138,16 +147,10 @@ class MaveoBox:
                 "A maveo box without push button is currently not supported"
             )
 
-        # Authenticate if no token
         if self._authenticationRequired and self._token is None:
             self._token = await loop.run_in_executor(None, self._pushbuttonAuthentication)
 
-        # Enable notifications for the Integrations namespace
         self._enable_notifications()
-
-        # Note: Notification listener will be started later from __init__.py
-        # to avoid blocking during initialization
-
         return self._token
 
     def _connect_socket(self, ssl_context: ssl.SSLContext | None = None) -> None:
@@ -174,7 +177,11 @@ class MaveoBox:
         if self._token is not None:
             return self._token
 
-        _LOGGER.info("Using push button authentication method")
+        _LOGGER.info(
+            "Using push button authentication method for %s:%s over JSON-RPC",
+            self._host,
+            self._port,
+        )
 
         command_id = self._commandId
         params: dict[str, str] = {"deviceName": "home assistant"}
@@ -201,7 +208,10 @@ class MaveoBox:
         self._commandId = command_id + 1
 
         _LOGGER.info(
-            "Initialized push button authentication, please press the pushbutton on the device"
+            "Push button authentication initialized for %s:%s; waiting up to %.1fs for confirmation",
+            self._host,
+            self._port,
+            self._pairing_timeout,
         )
 
         deadline = time.monotonic() + self._pairing_timeout
@@ -211,9 +221,9 @@ class MaveoBox:
                 ("notification" in response)
                 and response["notification"] == "JSONRPC.PushButtonAuthFinished"
             ):
-                _LOGGER.info("Notification received")
+                _LOGGER.info("Push button auth finished notification received from %s:%s", self._host, self._port)
                 if response["params"].get("success") is True:
-                    _LOGGER.info("Authenticated successfully")
+                    _LOGGER.info("Authenticated successfully via push button for %s:%s", self._host, self._port)
                     return response["params"].get("token")
                 raise RuntimeError("push button authentication failed")
 
@@ -221,10 +231,10 @@ class MaveoBox:
 
     def _enable_notifications(self) -> None:
         """Enable notifications for relevant namespaces."""
-        # In Nymea, notifications are automatically enabled after authentication.
-        # There's no need to explicitly enable them via API call.
-        # The notification listener will receive all notifications once started.
-        _LOGGER.info("Notifications are enabled by default after authentication")
+        _LOGGER.info(
+            "Notifications are enabled by default after authentication; WebSocket listener can be started later on port %s",
+            self._ws_port,
+        )
 
     def send_command(
         self, method: str, params: dict[str, Any] | None = None
@@ -241,15 +251,12 @@ class MaveoBox:
             if params is not None and len(params) > 0:
                 command_obj["params"] = params
 
-            # Send via JSON-RPC socket (port 2223).
             command: str = json.dumps(command_obj) + "\n"
             self._sock.send(command.encode("utf-8"))
 
-            # Wait for the response with id = commandId.
             responseId: int = -1
             while responseId != command_id:
                 response: dict[str, Any] = self._recv_json_line()
-                # Skip notifications (should rarely happen on command socket now).
                 if "notification" in response:
                     _LOGGER.warning(
                         "Received notification on command socket: %s",
@@ -262,24 +269,29 @@ class MaveoBox:
                 _LOGGER.error("JSON error happened: %s", response.get("error"))
                 return None
 
-            # Call went fine, return the response.
             return response
 
     async def _websocket_listener(self) -> None:
-        """WebSocket listener for push notifications from Nymea (port 4444)."""
-        _LOGGER.info("Starting WebSocket notification listener")
+        """WebSocket listener for push notifications from Nymea."""
+        _LOGGER.info(
+            "Starting WebSocket notification listener for %s using configured port %s",
+            self._host,
+            self._ws_port,
+        )
 
-        # Determine if we need SSL.
         ws_url: str = f"ws://{self._host}:{self._ws_port}"
         ssl_context: ssl.SSLContext | None = None
 
         try:
-            # Try non-SSL first.
             async with websockets.connect(ws_url) as websocket:
                 await self._ws_listen_loop(websocket)
         except (websockets.exceptions.WebSocketException, OSError) as ex:
-            _LOGGER.info("Non-SSL WebSocket failed, trying SSL: %s", ex)
-            # Try with SSL - create SSL context in executor to avoid blocking.
+            _LOGGER.info(
+                "Non-SSL WebSocket failed for %s on port %s, trying SSL: %s",
+                self._host,
+                self._ws_port,
+                ex,
+            )
             loop = self._hass.loop
             ssl_context = await loop.run_in_executor(None, self._create_ssl_context)
             ws_url = f"wss://{self._host}:{self._ws_port}"
@@ -288,13 +300,17 @@ class MaveoBox:
                 async with websockets.connect(ws_url, ssl=ssl_context) as websocket:
                     await self._ws_listen_loop(websocket)
             except Exception as ex:
-                _LOGGER.error("Failed to connect WebSocket: %s", ex)
+                _LOGGER.error(
+                    "Failed to connect WebSocket for %s on configured port %s: %s",
+                    self._host,
+                    self._ws_port,
+                    ex,
+                )
                 self.online = False
 
     async def _ws_listen_loop(self, websocket: Any) -> None:
         """Main WebSocket listening loop."""
         try:
-            # First, send JSONRPC.Hello handshake on WebSocket (without token).
             hello_message: dict[str, Any] = {
                 "id": 0,
                 "method": "JSONRPC.Hello",
@@ -311,8 +327,6 @@ class MaveoBox:
                 "WebSocket handshake successful: %s", hello_response.get("params", {})
             )
 
-            # If authentication is required, send Hello again WITH the token.
-            # This authenticates the WebSocket session.
             if self._authenticationRequired and self._token:
                 auth_hello = {
                     "id": 1,
@@ -331,14 +345,12 @@ class MaveoBox:
 
                 _LOGGER.info("WebSocket authenticated with token")
 
-            # Now enable notifications (after authentication).
             enable_notifications = {
                 "id": 2,
                 "method": "JSONRPC.SetNotificationStatus",
                 "params": {"enabled": True},
             }
 
-            # Add token at top level if authentication is required.
             if self._authenticationRequired and self._token:
                 enable_notifications["token"] = self._token
 
@@ -349,13 +361,11 @@ class MaveoBox:
             else:
                 _LOGGER.warning("Failed to enable notifications: %s", notif_response)
 
-            # Listen for notifications.
             while not self._stop_notification_listener:
                 try:
                     message_str = await asyncio.wait_for(websocket.recv(), timeout=1.0)
                     message = json.loads(message_str)
 
-                    # Only process notifications (not command responses).
                     if "notification" in message:
                         notification_name = message["notification"]
                         params = message.get("params", {})
@@ -365,13 +375,11 @@ class MaveoBox:
                             params,
                         )
 
-                        # Dispatch to registered handlers.
                         if notification_name in self._notification_handlers:
                             for handler in self._notification_handlers[
                                 notification_name
                             ]:
                                 try:
-                                    # Call handler in Home Assistant's event loop.
                                     self._hass.loop.call_soon_threadsafe(
                                         handler, params
                                     )
@@ -384,13 +392,11 @@ class MaveoBox:
                                 "No handler registered for: %s", notification_name
                             )
                     else:
-                        # Command response on WebSocket (shouldn't happen often).
                         _LOGGER.debug(
                             "Received command response on WebSocket: %s", message
                         )
 
                 except TimeoutError:
-                    # Normal timeout, continue loop.
                     continue
                 except websockets.exceptions.ConnectionClosed:
                     _LOGGER.warning("WebSocket connection closed")
@@ -452,18 +458,15 @@ class MaveoBox:
     async def discover_and_log_all_things(self) -> None:
         """Discover and log all available thing classes and things from the Nymea system."""
         try:
-            # Get all vendors
             loop = self._hass.loop
             vendors_response = await loop.run_in_executor(
                 None, self.send_command, "Integrations.GetVendors", None
             )
             vendors = vendors_response.get("params", {}).get("vendors", [])
 
-            # Create vendor lookup and store
             vendor_map = {v["id"]: v for v in vendors}
             self.vendors = vendor_map
 
-            # Get all thing classes
             thing_classes_response = await loop.run_in_executor(
                 None, self.send_command, "Integrations.GetThingClasses", None
             )
@@ -471,16 +474,13 @@ class MaveoBox:
                 "thingClasses", []
             )
 
-            # Store thing classes for dynamic entity generation
             self.thing_classes = thing_classes
 
-            # Get all things
             things_response = await loop.run_in_executor(
                 None, self.send_command, "Integrations.GetThings", None
             )
             things = things_response.get("params", {}).get("things", [])
 
-            # Build output as strings to reduce number of log calls
             output = []
             output.append("=" * 80)
             output.append("NYMEA DISCOVERY STARTING")
@@ -492,7 +492,6 @@ class MaveoBox:
             output.append("THING CLASSES AVAILABLE:")
             output.append("-" * 80)
 
-            # Log each thing class with detailed info
             for tc in thing_classes:
                 vendor = vendor_map.get(tc.get("vendorId"), {})
                 vendor_name = vendor.get("displayName", "Unknown")
@@ -503,7 +502,6 @@ class MaveoBox:
                 output.append(f"  - Vendor: {vendor_name}")
                 output.append(f"  - Vendor ID: {tc.get('vendorId', 'N/A')}")
 
-                # Log available state types
                 state_types = tc.get("stateTypes", [])
                 if state_types:
                     output.append(f"  - State Types ({len(state_types)}):")
@@ -512,7 +510,6 @@ class MaveoBox:
                             f"      * {st.get('displayName', 'N/A')} (ID: {st.get('id', 'N/A')}, Type: {st.get('type', 'N/A')})"
                         )
 
-                # Log available action types
                 action_types = tc.get("actionTypes", [])
                 if action_types:
                     output.append(f"  - Action Types ({len(action_types)}):")
@@ -521,7 +518,6 @@ class MaveoBox:
                             f"      * {at.get('displayName', 'N/A')} (ID: {at.get('id', 'N/A')})"
                         )
 
-                # Log available event types
                 event_types = tc.get("eventTypes", [])
                 if event_types:
                     output.append(f"  - Event Types ({len(event_types)}):")
@@ -535,7 +531,6 @@ class MaveoBox:
             output.append("THINGS (DEVICES) CONFIGURED:")
             output.append("-" * 80)
 
-            # Log each thing instance
             for thing in things:
                 thing_class = next(
                     (
@@ -558,7 +553,6 @@ class MaveoBox:
                     )
                     output.append(f"  - Vendor: {vendor.get('displayName', 'Unknown')}")
 
-                # Get current states for this thing
                 states_response = await loop.run_in_executor(
                     None,
                     self.send_command,
@@ -574,7 +568,6 @@ class MaveoBox:
                             state_type_id = state_value.get("stateTypeId")
                             value = state_value.get("value")
 
-                            # Try to find the state type name
                             state_type_name = "Unknown"
                             if thing_class:
                                 state_types = thing_class.get("stateTypes", [])
@@ -598,7 +591,6 @@ class MaveoBox:
             output.append("NYMEA DISCOVERY COMPLETE")
             output.append("=" * 80)
 
-            # Log everything as a single multi-line message
             _LOGGER.info("Nymea Discovery Results:\n%s", "\n".join(output))
 
         except Exception:
