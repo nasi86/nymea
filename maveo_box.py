@@ -216,7 +216,16 @@ class MaveoBox:
 
         deadline = time.monotonic() + self._pairing_timeout
         while time.monotonic() < deadline:
-            response = self._recv_json_line()
+            try:
+                response = self._recv_json_line()
+            except TimeoutError:
+                _LOGGER.debug(
+                    "Still waiting for push button auth confirmation from %s:%s",
+                    self._host,
+                    self._port,
+                )
+                continue
+
             if (
                 ("notification" in response)
                 and response["notification"] == "JSONRPC.PushButtonAuthFinished"
