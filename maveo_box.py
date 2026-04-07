@@ -46,6 +46,7 @@ class MaveoBox:
         self._commandId: int = 0
 
         self._sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._recv_buffer: bytes = b""
         self._socket_timeout: float = 10.0
         self._pairing_timeout: float = 35.0
 
@@ -156,6 +157,7 @@ class MaveoBox:
     def _connect_socket(self, ssl_context: ssl.SSLContext | None = None) -> None:
         """Create and connect the command socket with sane timeouts."""
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._recv_buffer = b""
         self._sock.settimeout(self._socket_timeout)
         self._sock.connect((self._host, self._port))
         if ssl_context is not None:
@@ -164,13 +166,25 @@ class MaveoBox:
 
     def _recv_json_line(self) -> dict[str, Any]:
         """Receive one JSON line from the command socket."""
-        data = b""
-        while b"}\n" not in data:
+        while b"\n" not in self._recv_buffer:
             chunk = self._sock.recv(4096)
             if chunk == b"":
                 raise RuntimeError("socket connection broken")
-            data += chunk
-        return json.loads(data.decode("utf-8"))
+            self._recv_buffer += chunk
+
+        line, _, remainder = self._recv_buffer.partition(b"\n")
+        self._recv_buffer = remainder
+
+        while line.strip() == b"":
+            if b"\n" not in self._recv_buffer:
+                chunk = self._sock.recv(4096)
+                if chunk == b"":
+                    raise RuntimeError("socket connection broken")
+                self._recv_buffer += chunk
+            line, _, remainder = self._recv_buffer.partition(b"\n")
+            self._recv_buffer = remainder
+
+        return json.loads(line.decode("utf-8"))
 
     def _pushbuttonAuthentication(self) -> str | None:
         """Authenticate using push button method."""
@@ -218,7 +232,7 @@ class MaveoBox:
         while time.monotonic() < deadline:
             try:
                 response = self._recv_json_line()
-            except TimeoutError:
+            except (TimeoutError, socket.timeout):
                 _LOGGER.debug(
                     "Still waiting for push button auth confirmation from %s:%s",
                     self._host,
