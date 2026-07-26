@@ -140,15 +140,15 @@ class DynamicThingSwitch(SwitchEntity):
             )
 
             # Log what we discovered about this action
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "Turn ON - Full action type definition for %s: %s",
                 self._thing.name,
                 action_type,
             )
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "Turn ON - Action ID we're looking for: %s", self._actionTypeId_on
             )
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "Turn ON - All available action types: %s",
                 [
                     {
@@ -174,7 +174,7 @@ class DynamicThingSwitch(SwitchEntity):
                     param_id = param_type.get("id")
                     param_name = param_type.get("name")
                     param_type_type = param_type.get("type", "unknown")
-                    _LOGGER.warning(
+                    _LOGGER.debug(
                         "Turn ON - Param type found: id=%s, name=%s, type=%s",
                         param_id,
                         param_name,
@@ -183,9 +183,9 @@ class DynamicThingSwitch(SwitchEntity):
                     # For Nymea API, use paramTypeId (the parameter ID) and value
                     param_list.append({"paramTypeId": param_id, "value": True})
                 exec_params["params"] = param_list
-                _LOGGER.warning("Turn ON - Built params: %s", exec_params["params"])
+                _LOGGER.debug("Turn ON - Built params: %s", exec_params["params"])
             else:
-                _LOGGER.warning("Turn ON - No parameters required for this action")
+                _LOGGER.debug("Turn ON - No parameters required for this action")
 
             # Execute the action and wait for response
             result = await self.hass.async_add_executor_job(
@@ -194,8 +194,8 @@ class DynamicThingSwitch(SwitchEntity):
                 exec_params,
             )
 
-            _LOGGER.warning("Turn ON - Execution params sent: %s", exec_params)
-            _LOGGER.warning("Turn ON - Result received: %s", result)
+            _LOGGER.debug("Turn ON - Execution params sent: %s", exec_params)
+            _LOGGER.debug("Turn ON - Result received: %s", result)
 
             if result is None:
                 _LOGGER.error(
@@ -243,12 +243,12 @@ class DynamicThingSwitch(SwitchEntity):
             )
 
             # Log what we discovered about this action
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "Turn OFF - Full action type definition for %s: %s",
                 self._thing.name,
                 action_type,
             )
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "Turn OFF - Action ID we're looking for: %s", self._actionTypeId_off
             )
 
@@ -266,7 +266,7 @@ class DynamicThingSwitch(SwitchEntity):
                     param_id = param_type.get("id")
                     param_name = param_type.get("name")
                     param_type_type = param_type.get("type", "unknown")
-                    _LOGGER.warning(
+                    _LOGGER.debug(
                         "Turn OFF - Param type found: id=%s, name=%s, type=%s",
                         param_id,
                         param_name,
@@ -275,9 +275,9 @@ class DynamicThingSwitch(SwitchEntity):
                     # For Nymea API, use paramTypeId (the parameter ID) and value
                     param_list.append({"paramTypeId": param_id, "value": False})
                 exec_params["params"] = param_list
-                _LOGGER.warning("Turn OFF - Built params: %s", exec_params["params"])
+                _LOGGER.debug("Turn OFF - Built params: %s", exec_params["params"])
             else:
-                _LOGGER.warning("Turn OFF - No parameters required for this action")
+                _LOGGER.debug("Turn OFF - No parameters required for this action")
 
             # Execute the action and wait for response
             result = await self.hass.async_add_executor_job(
@@ -286,8 +286,8 @@ class DynamicThingSwitch(SwitchEntity):
                 exec_params,
             )
 
-            _LOGGER.warning("Turn OFF - Execution params sent: %s", exec_params)
-            _LOGGER.warning("Turn OFF - Result received: %s", result)
+            _LOGGER.debug("Turn OFF - Execution params sent: %s", exec_params)
+            _LOGGER.debug("Turn OFF - Result received: %s", result)
 
             if result is None:
                 _LOGGER.error(

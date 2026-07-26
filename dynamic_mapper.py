@@ -239,14 +239,14 @@ def generate_entities_for_thing_class(
                     if action.get("id") != state_type_id
                 ]
 
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "State '%s' (ID: %s) - Found %d matching actions, %d parameterized",
                     display_name,
                     state_type_id,
                     len(matching_actions),
                     len(parameterized_actions),
                 )
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "Matching actions: %s",
                     [
                         {"id": a.get("id"), "name": a.get("name", a.get("displayName"))}
@@ -257,7 +257,7 @@ def generate_entities_for_thing_class(
                 if parameterized_actions:
                     # Use the parameterized action (different ID from state)
                     action_type_id = parameterized_actions[0].get("id")
-                    _LOGGER.warning(
+                    _LOGGER.debug(
                         "Creating switch for '%s' with parameterized action ID: %s (state ID: %s)",
                         display_name,
                         action_type_id,
@@ -266,7 +266,7 @@ def generate_entities_for_thing_class(
                 else:
                     # Fall back to toggle action (same ID as state)
                     action_type_id = matching_actions[0].get("id")
-                    _LOGGER.warning(
+                    _LOGGER.debug(
                         "Creating switch for '%s' with toggle action ID: %s (state ID: %s)",
                         display_name,
                         action_type_id,
