@@ -38,8 +38,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Prepare integration layout
+        run: |
+          mkdir -p "$RUNNER_TEMP/hassfest/nymea"
+          cp -a "$GITHUB_WORKSPACE/." "$RUNNER_TEMP/hassfest/nymea/"
+
       - name: Hassfest validation
-        uses: home-assistant/actions/hassfest@master
+        run: |
+          docker run --rm \
+            -v "$RUNNER_TEMP/hassfest:/github/workspace" \
+            ghcr.io/home-assistant/hassfest
 
   tests:
     name: Run tests
