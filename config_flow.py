@@ -36,7 +36,9 @@ def _normalize_discovery_properties(
     """Normalize zeroconf TXT properties to a plain lower-case string dict."""
     normalized: dict[str, str] = {}
     for key, value in (discovery_info.properties or {}).items():
-        norm_key = key.decode("utf-8", errors="ignore") if isinstance(key, bytes) else str(key)
+        norm_key = (
+            key.decode("utf-8", errors="ignore") if isinstance(key, bytes) else str(key)
+        )
         if isinstance(value, bytes):
             norm_value = value.decode("utf-8", errors="ignore")
         else:
@@ -54,7 +56,9 @@ def _parse_int_property(properties: dict[str, str], *keys: str) -> int | None:
         try:
             return int(raw_value)
         except (TypeError, ValueError):
-            _LOGGER.debug("Ignoring non-integer zeroconf property %s=%r", key, raw_value)
+            _LOGGER.debug(
+                "Ignoring non-integer zeroconf property %s=%r", key, raw_value
+            )
     return None
 
 
@@ -235,7 +239,9 @@ class NymeaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 host,
                 port,
             )
-            return self.async_show_form(step_id="link", errors={"base": "cannot_connect"})
+            return self.async_show_form(
+                step_id="link", errors={"base": "cannot_connect"}
+            )
         except Exception as ex:
             _LOGGER.exception(
                 "Pairing failed for %s:%s (jsonrpc_port=%s, websocket_port=%s): %s",
@@ -245,7 +251,18 @@ class NymeaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 websocket_port,
                 ex,
             )
-            return self.async_show_form(step_id="link", errors={"base": "cannot_connect"})
+            return self.async_show_form(
+                step_id="link", errors={"base": "cannot_connect"}
+            )
+        finally:
+            try:
+                await box.async_close()
+            except Exception:
+                _LOGGER.exception(
+                    "Error closing temporary pairing connection for %s:%s",
+                    host,
+                    port,
+                )
 
         self.data[CONF_TOKEN] = token
         _LOGGER.info(

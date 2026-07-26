@@ -120,6 +120,7 @@ async def test_form_link_step(hass: HomeAssistant, mock_maveo_box) -> None:
         CONF_WEBSOCKET_PORT: 4444,
         CONF_TOKEN: "test_token_12345",
     }
+    mock_maveo_box.async_close.assert_awaited_once()
 
 
 async def test_form_link_step_timeout_shows_error(
@@ -149,6 +150,34 @@ async def test_form_link_step_timeout_shows_error(
     assert result3["type"] == FlowResultType.FORM
     assert result3["step_id"] == "link"
     assert result3["errors"] == {"base": "cannot_connect"}
+    mock_maveo_box.async_close.assert_awaited_once()
+
+
+async def test_pairing_cleanup_error_does_not_mask_success(
+    hass: HomeAssistant, mock_maveo_box
+) -> None:
+    """Test a temporary-socket cleanup error does not discard the token."""
+    mock_maveo_box.async_close = AsyncMock(side_effect=RuntimeError("close failed"))
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+
+    with patch(
+        "custom_components.nymea.config_flow.MaveoBox",
+        return_value=mock_maveo_box,
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_HOST: "192.168.2.179",
+                CONF_PORT: 2222,
+                CONF_WEBSOCKET_PORT: 4444,
+            },
+        )
+        result3 = await hass.config_entries.flow.async_configure(result2["flow_id"], {})
+
+    assert result3["type"] == FlowResultType.CREATE_ENTRY
+    assert result3["data"][CONF_TOKEN] == "test_token_12345"
 
 
 async def test_zeroconf_discovery(hass: HomeAssistant, mock_maveo_box) -> None:

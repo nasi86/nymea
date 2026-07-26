@@ -87,7 +87,6 @@ def determine_sensor_type(
         and inverted indicates if binary sensor state should be inverted
     """
     display_name = state_type.get("displayName", "").lower()
-    state_type_id = state_type.get("id", "")
     data_type = state_type.get("type", "").lower()
 
     # Check if it's a binary sensor (Bool type)
@@ -199,40 +198,60 @@ def generate_entities_for_thing_class(
         if data_type == "bool":
             # Look for corresponding action types (match by ID or similar name)
             matching_actions = [
-                action for action in action_types
-                if action.get("id") == state_type_id or
-                action.get("name", "").lower() == display_name or
-                ("switch " + display_name) in action.get("name", "").lower() or
-                display_name in action.get("name", "").lower()
+                action
+                for action in action_types
+                if action.get("id") == state_type_id
+                or action.get("name", "").lower() == display_name
+                or ("switch " + display_name) in action.get("name", "").lower()
+                or display_name in action.get("name", "").lower()
             ]
 
             # If we have actions to control this state, make it a switch
             # Skip certain read-only states that shouldn't be switches
-            readonly_keywords = ["connected", "available", "reachable", "opened", "closed",
-                                 "maintenance", "intruder", "interrupted", "barrier", "critical"]
+            readonly_keywords = [
+                "connected",
+                "available",
+                "reachable",
+                "opened",
+                "closed",
+                "maintenance",
+                "intruder",
+                "interrupted",
+                "barrier",
+                "critical",
+            ]
             is_readonly = any(keyword in display_name for keyword in readonly_keywords)
 
             _LOGGER.debug(
                 "Checking bool state '%s' (ID: %s) - matching_actions: %d, is_readonly: %s",
-                display_name, state_type_id, len(matching_actions), is_readonly
+                display_name,
+                state_type_id,
+                len(matching_actions),
+                is_readonly,
             )
 
             if matching_actions and not is_readonly:
                 # Prefer actions with different IDs (parameterized) over same ID (toggle)
                 # Actions with parameters allow explicit on/off control
                 parameterized_actions = [
-                    action for action in matching_actions
+                    action
+                    for action in matching_actions
                     if action.get("id") != state_type_id
                 ]
 
                 _LOGGER.warning(
                     "State '%s' (ID: %s) - Found %d matching actions, %d parameterized",
-                    display_name, state_type_id, len(matching_actions), len(parameterized_actions)
+                    display_name,
+                    state_type_id,
+                    len(matching_actions),
+                    len(parameterized_actions),
                 )
                 _LOGGER.warning(
                     "Matching actions: %s",
-                    [{"id": a.get("id"), "name": a.get("name", a.get("displayName"))}
-                     for a in matching_actions]
+                    [
+                        {"id": a.get("id"), "name": a.get("name", a.get("displayName"))}
+                        for a in matching_actions
+                    ],
                 )
 
                 if parameterized_actions:
@@ -240,14 +259,18 @@ def generate_entities_for_thing_class(
                     action_type_id = parameterized_actions[0].get("id")
                     _LOGGER.warning(
                         "Creating switch for '%s' with parameterized action ID: %s (state ID: %s)",
-                        display_name, action_type_id, state_type_id
+                        display_name,
+                        action_type_id,
+                        state_type_id,
                     )
                 else:
                     # Fall back to toggle action (same ID as state)
                     action_type_id = matching_actions[0].get("id")
                     _LOGGER.warning(
                         "Creating switch for '%s' with toggle action ID: %s (state ID: %s)",
-                        display_name, action_type_id, state_type_id
+                        display_name,
+                        action_type_id,
+                        state_type_id,
                     )
 
                 switches.append(
@@ -294,28 +317,34 @@ def generate_entities_for_thing_class(
     # Common actions that should be buttons
     button_action_keywords = [
         "intermediate",  # Intermediate position for garage doors
-        "identify",      # Identify device (flash light)
-        "check",         # Check firmware, etc.
-        "connect",       # Manual connect
-        "disconnect",    # Manual disconnect
+        "identify",  # Identify device (flash light)
+        "check",  # Check firmware, etc.
+        "connect",  # Manual connect
+        "disconnect",  # Manual disconnect
     ]
 
     for action_type in action_types:
         action_id = action_type.get("id")
         action_name = action_type.get("name", "").lower()
-        action_display_name = action_type.get("displayName", action_type.get("name", ""))
+        action_display_name = action_type.get(
+            "displayName", action_type.get("name", "")
+        )
 
         # Skip actions that are already used as switches
         if any(s["action_type_id"] == action_id for s in switches):
             continue
 
         # Check if this action should be a button
-        should_be_button = any(keyword in action_name for keyword in button_action_keywords)
+        should_be_button = any(
+            keyword in action_name for keyword in button_action_keywords
+        )
 
         if should_be_button:
             _LOGGER.info(
                 "Creating button for action '%s' (ID: %s) in thing class '%s'",
-                action_display_name, action_id, thing_class_name
+                action_display_name,
+                action_id,
+                thing_class_name,
             )
             buttons.append(
                 {
@@ -328,7 +357,11 @@ def generate_entities_for_thing_class(
 
     _LOGGER.info(
         "Thing class '%s': Generated %d sensors, %d binary_sensors, %d switches, %d buttons",
-        thing_class_name, len(sensors), len(binary_sensors), len(switches), len(buttons)
+        thing_class_name,
+        len(sensors),
+        len(binary_sensors),
+        len(switches),
+        len(buttons),
     )
 
     return {
