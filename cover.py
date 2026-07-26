@@ -69,17 +69,7 @@ class GarageDoor(CoverEntity):
         # is used as the device name for device screens in the UI. This name is used on
         # entity screens, and used to build the Entity ID that's used is automations etc.
         self._attr_name: str = self._maveoStick.name
-        params: dict[str, str] = {}
-        params["thingClassId"] = self._maveoStick.thingclassid
-        stateTypes: list[dict[str, Any]] = self._maveoStick.maveoBox.send_command(
-            "Integrations.GetStateTypes", params
-        )["params"]["stateTypes"]  # type: ignore[index]
-
-        statetype_state: dict[str, Any] | None = next(
-            (obj for obj in stateTypes if obj["displayName"] == "State"),
-            None,
-        )
-        self.stateTypeIdState: str = statetype_state["id"]  # type: ignore[index]
+        self.stateTypeIdState = self._maveoStick.state_type_id
         self._available: bool = True
 
     async def async_added_to_hass(self) -> None:
@@ -92,13 +82,20 @@ class GarageDoor(CoverEntity):
 
     async def async_update(self) -> None:
         """Fetch initial state (called once before notification listener starts)."""
+        if self._maveoStick.state is not State.unknown:
+            self._available = True
+            return
+
         params: dict[str, str] = {}
         params["thingId"] = self._maveoStick.id
         params["stateTypeId"] = self.stateTypeIdState
         try:
-            value: str = self._maveoStick.maveoBox.send_command(
+            response = await self._maveoStick.maveoBox.async_send_command(
                 "Integrations.GetStateValue", params
-            )["params"]["value"]  # type: ignore[index]
+            )
+            if response is None:
+                raise RuntimeError("Nymea returned no cover state")
+            value: str = response["params"]["value"]
             self._maveoStick.state = State[value]
             self._available = True
         except Exception as ex:
@@ -149,40 +146,46 @@ class GarageDoor(CoverEntity):
 
     async def async_open_cover(self, **kwargs: Any) -> None:
         """Open the cover."""
-        params: dict[str, str] = {}
-        params["thingClassId"] = self._maveoStick.thingclassid
-        response: list[dict[str, Any]] = self._maveoStick.maveoBox.send_command(
-            "Integrations.GetActionTypes", params
-        )["params"]["actionTypes"]  # type: ignore[index]
-
         actionType_open: dict[str, Any] | None = next(
-            (obj for obj in response if obj["displayName"] == "Open"), None
+            (
+                item
+                for item in self._maveoStick.action_types
+                if item.get("displayName") == "Open"
+            ),
+            None,
         )
+        if actionType_open is None:
+            raise RuntimeError("Nymea maveo stick has no Open action")
 
-        params = {}
+        params: dict[str, str] = {}
         params["actionTypeId"] = actionType_open["id"]  # type: ignore[index]
         params["thingId"] = self._maveoStick.id
-        self._maveoStick.maveoBox.send_command("Integrations.ExecuteAction", params)
+        await self._maveoStick.maveoBox.async_send_command(
+            "Integrations.ExecuteAction", params
+        )
 
         self._maveoStick.state = State.opening
         await self._maveoStick.publish_updates()
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Close the cover."""
-        params: dict[str, str] = {}
-        params["thingClassId"] = self._maveoStick.thingclassid
-        response: list[dict[str, Any]] = self._maveoStick.maveoBox.send_command(
-            "Integrations.GetActionTypes", params
-        )["params"]["actionTypes"]  # type: ignore[index]
-
-        actionType_open: dict[str, Any] | None = next(
-            (obj for obj in response if obj["displayName"] == "Close"), None
+        action_type_close: dict[str, Any] | None = next(
+            (
+                item
+                for item in self._maveoStick.action_types
+                if item.get("displayName") == "Close"
+            ),
+            None,
         )
+        if action_type_close is None:
+            raise RuntimeError("Nymea maveo stick has no Close action")
 
-        params = {}
-        params["actionTypeId"] = actionType_open["id"]  # type: ignore[index]
+        params: dict[str, str] = {}
+        params["actionTypeId"] = action_type_close["id"]
         params["thingId"] = self._maveoStick.id
-        self._maveoStick.maveoBox.send_command("Integrations.ExecuteAction", params)
+        await self._maveoStick.maveoBox.async_send_command(
+            "Integrations.ExecuteAction", params
+        )
 
         self._maveoStick.state = State.closing
         await self._maveoStick.publish_updates()

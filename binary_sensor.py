@@ -87,13 +87,22 @@ class DynamicBinaryThingSensor(BinarySensorEntity):
 
     async def async_update(self) -> None:
         """Fetch initial state (called once before notification listener starts)."""
+        cached_value = self._thing.get_state_value(self._stateTypeId)
+        if cached_value is not None:
+            self._is_on = not cached_value if self._inverted else cached_value
+            self._available = True
+            return
+
         params: dict[str, str] = {}
         params["thingId"] = self._thing.id
         params["stateTypeId"] = self._stateTypeId
         try:
-            value: bool = self._thing.maveoBox.send_command(
+            response = await self._thing.maveoBox.async_send_command(
                 "Integrations.GetStateValue", params
-            )["params"]["value"]  # type: ignore[index]
+            )
+            if response is None:
+                raise RuntimeError("Nymea returned no binary sensor state")
+            value: bool = response["params"]["value"]
             # Cache the original value in the Thing for future notifications.
             self._thing._state_cache[self._stateTypeId] = value
             # Invert value if configured (e.g., "Closed" state)

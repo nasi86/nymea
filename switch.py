@@ -84,13 +84,22 @@ class DynamicThingSwitch(SwitchEntity):
 
     async def async_update(self) -> None:
         """Fetch initial state (called once before notification listener starts)."""
+        cached_value = self._thing.get_state_value(self._stateTypeId)
+        if cached_value is not None:
+            self._is_on = cached_value
+            self._available = True
+            return
+
         params: dict[str, str] = {}
         params["thingId"] = self._thing.id
         params["stateTypeId"] = self._stateTypeId
         try:
-            value: bool = self._thing.maveoBox.send_command(
+            response = await self._thing.maveoBox.async_send_command(
                 "Integrations.GetStateValue", params
-            )["params"]["value"]  # type: ignore[index]
+            )
+            if response is None:
+                raise RuntimeError("Nymea returned no switch state")
+            value: bool = response["params"]["value"]
             # Cache the original value in the Thing for future notifications.
             self._thing._state_cache[self._stateTypeId] = value
             self._is_on = value
@@ -133,15 +142,22 @@ class DynamicThingSwitch(SwitchEntity):
             # Log what we discovered about this action
             _LOGGER.warning(
                 "Turn ON - Full action type definition for %s: %s",
-                self._thing.name, action_type
+                self._thing.name,
+                action_type,
             )
             _LOGGER.warning(
                 "Turn ON - Action ID we're looking for: %s", self._actionTypeId_on
             )
             _LOGGER.warning(
                 "Turn ON - All available action types: %s",
-                [{"id": at.get("id"), "name": at.get("name", at.get("displayName")),
-                  "paramTypes": at.get("paramTypes", [])} for at in action_types]
+                [
+                    {
+                        "id": at.get("id"),
+                        "name": at.get("name", at.get("displayName")),
+                        "paramTypes": at.get("paramTypes", []),
+                    }
+                    for at in action_types
+                ],
             )
 
             # Build the execution params
@@ -160,7 +176,9 @@ class DynamicThingSwitch(SwitchEntity):
                     param_type_type = param_type.get("type", "unknown")
                     _LOGGER.warning(
                         "Turn ON - Param type found: id=%s, name=%s, type=%s",
-                        param_id, param_name, param_type_type
+                        param_id,
+                        param_name,
+                        param_type_type,
                     )
                     # For Nymea API, use paramTypeId (the parameter ID) and value
                     param_list.append({"paramTypeId": param_id, "value": True})
@@ -180,10 +198,16 @@ class DynamicThingSwitch(SwitchEntity):
             _LOGGER.warning("Turn ON - Result received: %s", result)
 
             if result is None:
-                _LOGGER.error("Failed to execute turn_on action for %s", self._thing.name)
+                _LOGGER.error(
+                    "Failed to execute turn_on action for %s", self._thing.name
+                )
                 return
 
-            _LOGGER.info("Turn ON command successful for %s, result: %s", self._thing.name, result)
+            _LOGGER.info(
+                "Turn ON command successful for %s, result: %s",
+                self._thing.name,
+                result,
+            )
             # Don't update state optimistically - wait for notification from device
         except Exception as ex:
             _LOGGER.error(
@@ -221,7 +245,8 @@ class DynamicThingSwitch(SwitchEntity):
             # Log what we discovered about this action
             _LOGGER.warning(
                 "Turn OFF - Full action type definition for %s: %s",
-                self._thing.name, action_type
+                self._thing.name,
+                action_type,
             )
             _LOGGER.warning(
                 "Turn OFF - Action ID we're looking for: %s", self._actionTypeId_off
@@ -243,7 +268,9 @@ class DynamicThingSwitch(SwitchEntity):
                     param_type_type = param_type.get("type", "unknown")
                     _LOGGER.warning(
                         "Turn OFF - Param type found: id=%s, name=%s, type=%s",
-                        param_id, param_name, param_type_type
+                        param_id,
+                        param_name,
+                        param_type_type,
                     )
                     # For Nymea API, use paramTypeId (the parameter ID) and value
                     param_list.append({"paramTypeId": param_id, "value": False})
@@ -263,10 +290,16 @@ class DynamicThingSwitch(SwitchEntity):
             _LOGGER.warning("Turn OFF - Result received: %s", result)
 
             if result is None:
-                _LOGGER.error("Failed to execute turn_off action for %s", self._thing.name)
+                _LOGGER.error(
+                    "Failed to execute turn_off action for %s", self._thing.name
+                )
                 return
 
-            _LOGGER.info("Turn OFF command successful for %s, result: %s", self._thing.name, result)
+            _LOGGER.info(
+                "Turn OFF command successful for %s, result: %s",
+                self._thing.name,
+                result,
+            )
             # Don't update state optimistically - wait for notification from device
         except Exception as ex:
             _LOGGER.error(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
@@ -12,6 +14,16 @@ from .maveo_stick import MaveoStick
 from .thing import Thing
 
 PLATFORMS: list[str] = ["cover", "sensor", "binary_sensor", "switch", "button"]
+
+_LOGGER = logging.getLogger(__name__)
+
+
+async def _async_close_after_error(nymea_hub: maveo_box.MaveoBox) -> None:
+    """Close hub resources without masking the active setup exception."""
+    try:
+        await nymea_hub.async_close()
+    except Exception:
+        _LOGGER.exception("Error closing nymea resources after setup failure")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -36,26 +48,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     try:
-        await nymea_hub.init_connection()
-    except Exception as ex:
-        raise ConfigEntryNotReady(
-            f"Error while connecting to {entry.data['host']}"
-        ) from ex
+        try:
+            await nymea_hub.init_connection()
+        except Exception as ex:
+            raise ConfigEntryNotReady(
+                f"Error while connecting to {entry.data['host']}"
+            ) from ex
 
-    # Discover and log all available thing classes and things
-    await nymea_hub.discover_and_log_all_things()
+        # Discover and log all available thing classes and things
+        await nymea_hub.discover_and_log_all_things()
 
-    # Store in runtime_data instead of hass.data.
-    entry.runtime_data = nymea_hub
+        # Store in runtime_data instead of hass.data.
+        entry.runtime_data = nymea_hub
 
-    await MaveoStick.add(nymea_hub)
-    await Thing.add(nymea_hub)
+        await MaveoStick.add(nymea_hub)
+        await Thing.add(nymea_hub)
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Start notification listener AFTER all entities are set up.
-    # This prevents blocking during initialization.
-    nymea_hub.start_notification_listener()
+        # Register the long-running listener with this config entry so setup can
+        # finish and Home Assistant owns cancellation during unload.
+        nymea_hub.start_notification_listener(entry)
+    except Exception:
+        await _async_close_after_error(nymea_hub)
+        raise
 
     return True
 
@@ -70,11 +86,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     Returns:
         True if unload was successful.
     """
-    # Stop the notification listener before removing the hub.
     nymea_hub = entry.runtime_data
-    await nymea_hub.stop_notification_listener()
-
-    # Unload platforms.
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-
+    if unload_ok:
+        await nymea_hub.async_close()
     return unload_ok

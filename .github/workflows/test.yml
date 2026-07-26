@@ -29,7 +29,7 @@ jobs:
 
       - name: Lint with ruff
         run: |
-          ruff check custom_components/nymea/
+          ruff check .
 
   validate:
     name: Validate with hassfest
@@ -57,8 +57,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-homeassistant-custom-component
+          pip install pytest pytest-homeassistant-custom-component \
+            "websockets>=15.0" "zeroconf==0.136.2"
 
       - name: Run tests
         run: |
-          pytest custom_components/nymea/tests/ -v
+          mkdir -p "$RUNNER_TEMP/ha-test/custom_components"
+          ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/ha-test/custom_components/nymea"
+          PYTHONPATH="$RUNNER_TEMP/ha-test" pytest tests/ -v

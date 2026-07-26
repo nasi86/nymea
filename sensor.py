@@ -87,13 +87,22 @@ class DynamicThingSensor(SensorEntity):
 
     async def async_update(self) -> None:
         """Fetch initial state (called once before notification listener starts)."""
+        cached_value = self._thing.get_state_value(self._stateTypeId)
+        if cached_value is not None:
+            self.value = cached_value
+            self._available = True
+            return
+
         params: dict[str, str] = {}
         params["thingId"] = self._thing.id
         params["stateTypeId"] = self._stateTypeId
         try:
-            value: float | int | str = self._thing.maveoBox.send_command(
+            response = await self._thing.maveoBox.async_send_command(
                 "Integrations.GetStateValue", params
-            )["params"]["value"]  # type: ignore[index]
+            )
+            if response is None:
+                raise RuntimeError("Nymea returned no sensor state")
+            value: float | int | str = response["params"]["value"]
             self.value = value
             # Also cache it in the Thing for future notifications.
             self._thing._state_cache[self._stateTypeId] = value

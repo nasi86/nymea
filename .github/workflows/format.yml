@@ -35,7 +35,7 @@ jobs:
 
       - name: Format with ruff
         run: |
-          ruff format custom_components/nymea/
+          ruff format .
 
       - name: Check for changes
         id: check_changes

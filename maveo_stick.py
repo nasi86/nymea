@@ -30,14 +30,23 @@ class MaveoStick:
         name: str,
         version: str,
         maveoBox: MaveoBox,
+        state_type_id: str,
+        action_types: list[dict[str, Any]],
+        initial_state: str | None = None,
     ) -> None:
         """Init stick."""
         self._id: str = thingid
         self.name: str = name
         self.firmware_version: str = version
         self.maveoBox: MaveoBox = maveoBox
+        self.state_type_id = state_type_id
+        self.action_types = action_types
         self._callbacks: set[Callable[[], None]] = set()
-        self.state: State = State.closed
+        self.state = (
+            State[initial_state]
+            if initial_state in State.__members__
+            else State.unknown
+        )
 
         # Register for state change notifications.
         self._register_for_notifications()
@@ -107,35 +116,57 @@ class MaveoStick:
 
     @staticmethod
     async def add(maveoBox: MaveoBox):
-        # things = maveoBox.nymea.get_things(MaveoStick.thingclassid)
-        """Add all maveo sticks connected to the maveo box."""
-        params = {}
-        params["thingClassId"] = MaveoStick.thingclassid
-        stateTypes = maveoBox.send_command("Integrations.GetStateTypes", params)[
-            "params"
-        ]["stateTypes"]
-
-        statetype_version = next(
-            (obj for obj in stateTypes if obj["displayName"] == "maveo-stick version"),
+        """Add all maveo sticks from the shared discovery snapshot."""
+        thing_class = next(
+            (
+                item
+                for item in maveoBox.thing_classes
+                if item.get("id") == MaveoStick.thingclassid
+            ),
             None,
         )
+        if thing_class is None:
+            return
 
-        things = maveoBox.send_command("Integrations.GetThings")["params"]["things"]
-        for thing in things:
-            if thing["thingClassId"] == MaveoStick.thingclassid:
-                version = next(
-                    (
-                        obj
-                        for obj in thing["states"]
-                        if obj["stateTypeId"] == statetype_version["id"]
-                    ),
-                    None,
-                )["value"]
-                maveoBox.maveoSticks.append(
-                    MaveoStick(
-                        thing["id"],
-                        thing["name"],
-                        version,
-                        maveoBox,
-                    )
+        state_types = thing_class.get("stateTypes", [])
+
+        statetype_version = next(
+            (
+                item
+                for item in state_types
+                if item.get("displayName") == "maveo-stick version"
+            ),
+            None,
+        )
+        statetype_state = next(
+            (item for item in state_types if item.get("displayName") == "State"),
+            None,
+        )
+        if statetype_state is None:
+            _LOGGER.warning("Maveo stick thing class has no State state type")
+            return
+
+        for thing in maveoBox.discovered_things:
+            if thing.get("thingClassId") != MaveoStick.thingclassid:
+                continue
+
+            states = {
+                state.get("stateTypeId"): state.get("value")
+                for state in thing.get("states", [])
+            }
+            version = (
+                states.get(statetype_version.get("id"), "unknown")
+                if statetype_version
+                else "unknown"
+            )
+            maveoBox.maveoSticks.append(
+                MaveoStick(
+                    thing["id"],
+                    thing["name"],
+                    version,
+                    maveoBox,
+                    statetype_state["id"],
+                    thing_class.get("actionTypes", []),
+                    states.get(statetype_state["id"]),
                 )
+            )

@@ -13,12 +13,15 @@ from threading import Lock
 import time
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 import websockets
 
 _LOGGER = logging.getLogger(__name__)
 
 mutex: Lock = Lock()
+WEBSOCKET_RECONNECT_MIN_DELAY = 5
+WEBSOCKET_RECONNECT_MAX_DELAY = 60
 
 
 class MaveoBox:
@@ -45,13 +48,14 @@ class MaveoBox:
         self._initialSetupRequired: bool = False
         self._commandId: int = 0
 
-        self._sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock: socket.socket | ssl.SSLSocket | None = None
         self._recv_buffer: bytes = b""
         self._socket_timeout: float = 10.0
         self._pairing_timeout: float = 35.0
 
         self._ws: Any = None
         self._ws_task: asyncio.Task[None] | None = None
+        self._ws_use_ssl: bool | None = None
 
         self.maveoSticks: list[Any] = []
         self.things: list[Any] = []
@@ -59,6 +63,7 @@ class MaveoBox:
 
         self.thing_classes: list[dict[str, Any]] = []
         self.vendors: dict[str, dict[str, Any]] = {}
+        self.discovered_things: list[dict[str, Any]] = []
 
         self._notification_handlers: dict[
             str, list[Callable[[dict[str, Any]], None]]
@@ -72,6 +77,10 @@ class MaveoBox:
 
     async def test_connection(self) -> bool:
         """Tests initial connectivity during setup."""
+        return await self._hass.async_add_executor_job(self._test_connection)
+
+    def _test_connection(self) -> bool:
+        """Test initial connectivity without blocking the event loop."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(5)
             try:
@@ -110,6 +119,7 @@ class MaveoBox:
                 self._port,
                 ex,
             )
+            await loop.run_in_executor(None, self._close_socket)
             context = await loop.run_in_executor(None, self._create_ssl_context)
             await loop.run_in_executor(None, self._connect_socket, context)
             handshake_message = await loop.run_in_executor(
@@ -149,25 +159,53 @@ class MaveoBox:
             )
 
         if self._authenticationRequired and self._token is None:
-            self._token = await loop.run_in_executor(None, self._pushbuttonAuthentication)
+            self._token = await loop.run_in_executor(
+                None, self._pushbuttonAuthentication
+            )
 
         self._enable_notifications()
         return self._token
 
     def _connect_socket(self, ssl_context: ssl.SSLContext | None = None) -> None:
         """Create and connect the command socket with sane timeouts."""
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._close_socket()
+        command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            command_socket.settimeout(self._socket_timeout)
+            command_socket.connect((self._host, self._port))
+            if ssl_context is not None:
+                command_socket = ssl_context.wrap_socket(command_socket)
+                command_socket.settimeout(self._socket_timeout)
+        except Exception:
+            command_socket.close()
+            raise
+
+        self._sock = command_socket
         self._recv_buffer = b""
-        self._sock.settimeout(self._socket_timeout)
-        self._sock.connect((self._host, self._port))
-        if ssl_context is not None:
-            self._sock = ssl_context.wrap_socket(self._sock)
-            self._sock.settimeout(self._socket_timeout)
+
+    def _close_socket(self) -> None:
+        """Close and discard the command socket."""
+        command_socket = self._sock
+        self._sock = None
+        self._recv_buffer = b""
+        if command_socket is None:
+            return
+
+        with contextlib.suppress(OSError):
+            command_socket.shutdown(socket.SHUT_RDWR)
+        with contextlib.suppress(OSError):
+            command_socket.close()
+
+    def _command_socket(self) -> socket.socket | ssl.SSLSocket:
+        """Return the active command socket."""
+        if self._sock is None:
+            raise RuntimeError("command socket is not connected")
+        return self._sock
 
     def _recv_json_line(self) -> dict[str, Any]:
         """Receive one JSON line from the command socket."""
         while b"\n" not in self._recv_buffer:
-            chunk = self._sock.recv(4096)
+            chunk = self._command_socket().recv(4096)
             if chunk == b"":
                 raise RuntimeError("socket connection broken")
             self._recv_buffer += chunk
@@ -177,7 +215,7 @@ class MaveoBox:
 
         while line.strip() == b"":
             if b"\n" not in self._recv_buffer:
-                chunk = self._sock.recv(4096)
+                chunk = self._command_socket().recv(4096)
                 if chunk == b"":
                     raise RuntimeError("socket connection broken")
                 self._recv_buffer += chunk
@@ -206,7 +244,7 @@ class MaveoBox:
         }
 
         command = json.dumps(command_obj) + "\n"
-        self._sock.send(command.encode("utf-8"))
+        self._command_socket().sendall(command.encode("utf-8"))
 
         response_id = -1
         while response_id != command_id:
@@ -232,7 +270,7 @@ class MaveoBox:
         while time.monotonic() < deadline:
             try:
                 response = self._recv_json_line()
-            except (TimeoutError, socket.timeout):
+            except TimeoutError:
                 _LOGGER.debug(
                     "Still waiting for push button auth confirmation from %s:%s",
                     self._host,
@@ -240,13 +278,20 @@ class MaveoBox:
                 )
                 continue
 
-            if (
-                ("notification" in response)
-                and response["notification"] == "JSONRPC.PushButtonAuthFinished"
-            ):
-                _LOGGER.info("Push button auth finished notification received from %s:%s", self._host, self._port)
+            if ("notification" in response) and response[
+                "notification"
+            ] == "JSONRPC.PushButtonAuthFinished":
+                _LOGGER.info(
+                    "Push button auth finished notification received from %s:%s",
+                    self._host,
+                    self._port,
+                )
                 if response["params"].get("success") is True:
-                    _LOGGER.info("Authenticated successfully via push button for %s:%s", self._host, self._port)
+                    _LOGGER.info(
+                        "Authenticated successfully via push button for %s:%s",
+                        self._host,
+                        self._port,
+                    )
                     return response["params"].get("token")
                 raise RuntimeError("push button authentication failed")
 
@@ -275,7 +320,7 @@ class MaveoBox:
                 command_obj["params"] = params
 
             command: str = json.dumps(command_obj) + "\n"
-            self._sock.send(command.encode("utf-8"))
+            self._command_socket().sendall(command.encode("utf-8"))
 
             responseId: int = -1
             while responseId != command_id:
@@ -294,45 +339,69 @@ class MaveoBox:
 
             return response
 
-    async def _websocket_listener(self) -> None:
-        """WebSocket listener for push notifications from Nymea."""
-        _LOGGER.info(
-            "Starting WebSocket notification listener for %s using configured port %s",
-            self._host,
-            self._ws_port,
+    async def async_send_command(
+        self, method: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Run a JSON-RPC command without blocking Home Assistant's event loop."""
+        return await self._hass.async_add_executor_job(
+            self.send_command, method, params
         )
 
-        ws_url: str = f"ws://{self._host}:{self._ws_port}"
-        ssl_context: ssl.SSLContext | None = None
+    async def _websocket_listener(self) -> None:
+        """Keep the WebSocket notification listener connected with backoff."""
+        reconnect_delay = WEBSOCKET_RECONNECT_MIN_DELAY
 
-        try:
-            async with websockets.connect(ws_url) as websocket:
-                await self._ws_listen_loop(websocket)
-        except (websockets.exceptions.WebSocketException, OSError) as ex:
-            _LOGGER.info(
-                "Non-SSL WebSocket failed for %s on port %s, trying SSL: %s",
+        while not self._stop_notification_listener:
+            connected = await self._listen_websocket_once()
+            if self._stop_notification_listener:
+                return
+
+            self.online = False
+            if connected:
+                reconnect_delay = WEBSOCKET_RECONNECT_MIN_DELAY
+
+            _LOGGER.warning(
+                "Nymea WebSocket disconnected from %s:%s; reconnecting in %ss",
                 self._host,
                 self._ws_port,
-                ex,
+                reconnect_delay,
             )
-            loop = self._hass.loop
-            ssl_context = await loop.run_in_executor(None, self._create_ssl_context)
-            ws_url = f"wss://{self._host}:{self._ws_port}"
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, WEBSOCKET_RECONNECT_MAX_DELAY)
+
+    async def _listen_websocket_once(self) -> bool:
+        """Connect once, detecting TLS only until a transport has worked."""
+        transports = (False, True) if self._ws_use_ssl is None else (self._ws_use_ssl,)
+
+        for use_ssl in transports:
+            scheme = "wss" if use_ssl else "ws"
+            ws_url = f"{scheme}://{self._host}:{self._ws_port}"
+            ssl_context = None
+            if use_ssl:
+                ssl_context = await self._hass.async_add_executor_job(
+                    self._create_ssl_context
+                )
 
             try:
                 async with websockets.connect(ws_url, ssl=ssl_context) as websocket:
-                    await self._ws_listen_loop(websocket)
-            except Exception as ex:
-                _LOGGER.error(
-                    "Failed to connect WebSocket for %s on configured port %s: %s",
+                    connected = await self._ws_listen_loop(websocket)
+                    if connected:
+                        self._ws_use_ssl = use_ssl
+                    return connected
+            except (websockets.exceptions.WebSocketException, OSError) as ex:
+                _LOGGER.debug(
+                    "Nymea WebSocket %s connection to %s:%s failed: %s",
+                    scheme,
                     self._host,
                     self._ws_port,
                     ex,
                 )
-                self.online = False
 
-    async def _ws_listen_loop(self, websocket: Any) -> None:
+        return False
+
+    async def _ws_listen_loop(self, websocket: Any) -> bool:
         """Main WebSocket listening loop."""
+        connected = False
         try:
             hello_message: dict[str, Any] = {
                 "id": 0,
@@ -344,7 +413,7 @@ class MaveoBox:
 
             if hello_response.get("status") != "success":
                 _LOGGER.error("WebSocket handshake failed: %s", hello_response)
-                return
+                return False
 
             _LOGGER.debug(
                 "WebSocket handshake successful: %s", hello_response.get("params", {})
@@ -364,9 +433,9 @@ class MaveoBox:
                     _LOGGER.error(
                         "WebSocket token authentication failed: %s", auth_response
                     )
-                    return
+                    return False
 
-                _LOGGER.info("WebSocket authenticated with token")
+                _LOGGER.debug("WebSocket authenticated with token")
 
             enable_notifications = {
                 "id": 2,
@@ -380,9 +449,13 @@ class MaveoBox:
             await websocket.send(json.dumps(enable_notifications))
             notif_response = json.loads(await websocket.recv())
             if notif_response.get("status") == "success":
-                _LOGGER.info("WebSocket notifications enabled")
+                _LOGGER.debug("WebSocket notifications enabled")
             else:
                 _LOGGER.warning("Failed to enable notifications: %s", notif_response)
+                return False
+
+            connected = True
+            self.online = True
 
             while not self._stop_notification_listener:
                 try:
@@ -392,7 +465,7 @@ class MaveoBox:
                     if "notification" in message:
                         notification_name = message["notification"]
                         params = message.get("params", {})
-                        _LOGGER.info(
+                        _LOGGER.debug(
                             "WebSocket notification: %s with params: %s",
                             notification_name,
                             params,
@@ -422,7 +495,6 @@ class MaveoBox:
                 except TimeoutError:
                     continue
                 except websockets.exceptions.ConnectionClosed:
-                    _LOGGER.warning("WebSocket connection closed")
                     break
                 except Exception as ex:
                     _LOGGER.exception("Error in WebSocket listener: %s", ex)
@@ -431,7 +503,9 @@ class MaveoBox:
         except Exception as ex:
             _LOGGER.exception("WebSocket listen loop error: %s", ex)
         finally:
-            _LOGGER.info("WebSocket notification listener stopped")
+            _LOGGER.debug("WebSocket notification listener stopped")
+
+        return connected
 
     def register_notification_handler(
         self, notification_name: str, handler: Callable[[dict[str, Any]], None]
@@ -454,22 +528,36 @@ class MaveoBox:
                 "Unregistered handler for notification: %s", notification_name
             )
 
-    def start_notification_listener(self) -> None:
+    def start_notification_listener(self, entry: ConfigEntry) -> None:
         """Start the WebSocket notification listener."""
         if self._ws_task is None or self._ws_task.done():
             self._stop_notification_listener = False
-            self._ws_task = self._hass.async_create_task(self._websocket_listener())
-            _LOGGER.info("Started WebSocket notification listener task")
+            self._ws_task = entry.async_create_background_task(
+                self._hass,
+                self._websocket_listener(),
+                f"nymea websocket listener for {self._host}",
+            )
+            _LOGGER.debug("Scheduled WebSocket notification listener task")
 
     async def stop_notification_listener(self) -> None:
         """Stop the WebSocket notification listener."""
         self._stop_notification_listener = True
-        if self._ws_task and not self._ws_task.done():
-            self._ws_task.cancel()
+        task = self._ws_task
+        if task is None:
+            return
+
+        if not task.done():
+            task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._ws_task
-            _LOGGER.info("Stopped WebSocket notification listener")
-            _LOGGER.info("Stopped WebSocket notification listener")
+                await task
+        self._ws_task = None
+
+    async def async_close(self) -> None:
+        """Stop background work and close the command connection."""
+        try:
+            await self.stop_notification_listener()
+        finally:
+            await self._hass.async_add_executor_job(self._close_socket)
 
     def get_thing_class_name(self, thingclass_id: str) -> str | None:
         """Get the display name of a thing class by its ID."""
@@ -479,142 +567,26 @@ class MaveoBox:
         return None
 
     async def discover_and_log_all_things(self) -> None:
-        """Discover and log all available thing classes and things from the Nymea system."""
-        try:
-            loop = self._hass.loop
-            vendors_response = await loop.run_in_executor(
-                None, self.send_command, "Integrations.GetVendors", None
-            )
-            vendors = vendors_response.get("params", {}).get("vendors", [])
+        """Load one discovery snapshot for all entity platforms."""
+        vendors_response = await self.async_send_command("Integrations.GetVendors")
+        thing_classes_response = await self.async_send_command(
+            "Integrations.GetThingClasses"
+        )
+        things_response = await self.async_send_command("Integrations.GetThings")
 
-            vendor_map = {v["id"]: v for v in vendors}
-            self.vendors = vendor_map
+        if not vendors_response or not thing_classes_response or not things_response:
+            raise RuntimeError("Nymea discovery returned an empty response")
 
-            thing_classes_response = await loop.run_in_executor(
-                None, self.send_command, "Integrations.GetThingClasses", None
-            )
-            thing_classes = thing_classes_response.get("params", {}).get(
-                "thingClasses", []
-            )
+        vendors = vendors_response.get("params", {}).get("vendors", [])
+        self.vendors = {vendor["id"]: vendor for vendor in vendors}
+        self.thing_classes = thing_classes_response.get("params", {}).get(
+            "thingClasses", []
+        )
+        self.discovered_things = things_response.get("params", {}).get("things", [])
 
-            self.thing_classes = thing_classes
-
-            things_response = await loop.run_in_executor(
-                None, self.send_command, "Integrations.GetThings", None
-            )
-            things = things_response.get("params", {}).get("things", [])
-
-            output = []
-            output.append("=" * 80)
-            output.append("NYMEA DISCOVERY STARTING")
-            output.append("=" * 80)
-            output.append(
-                f"Found {len(vendors)} vendors, {len(thing_classes)} thing classes, {len(things)} things (devices)"
-            )
-            output.append("-" * 80)
-            output.append("THING CLASSES AVAILABLE:")
-            output.append("-" * 80)
-
-            for tc in thing_classes:
-                vendor = vendor_map.get(tc.get("vendorId"), {})
-                vendor_name = vendor.get("displayName", "Unknown")
-
-                output.append("")
-                output.append(f"Thing Class: {tc.get('displayName', 'N/A')}")
-                output.append(f"  - ID: {tc.get('id', 'N/A')}")
-                output.append(f"  - Vendor: {vendor_name}")
-                output.append(f"  - Vendor ID: {tc.get('vendorId', 'N/A')}")
-
-                state_types = tc.get("stateTypes", [])
-                if state_types:
-                    output.append(f"  - State Types ({len(state_types)}):")
-                    for st in state_types:
-                        output.append(
-                            f"      * {st.get('displayName', 'N/A')} (ID: {st.get('id', 'N/A')}, Type: {st.get('type', 'N/A')})"
-                        )
-
-                action_types = tc.get("actionTypes", [])
-                if action_types:
-                    output.append(f"  - Action Types ({len(action_types)}):")
-                    for at in action_types:
-                        output.append(
-                            f"      * {at.get('displayName', 'N/A')} (ID: {at.get('id', 'N/A')})"
-                        )
-
-                event_types = tc.get("eventTypes", [])
-                if event_types:
-                    output.append(f"  - Event Types ({len(event_types)}):")
-                    for et in event_types:
-                        output.append(
-                            f"      * {et.get('displayName', 'N/A')} (ID: {et.get('id', 'N/A')})"
-                        )
-
-            output.append("")
-            output.append("-" * 80)
-            output.append("THINGS (DEVICES) CONFIGURED:")
-            output.append("-" * 80)
-
-            for thing in things:
-                thing_class = next(
-                    (
-                        tc
-                        for tc in thing_classes
-                        if tc["id"] == thing.get("thingClassId")
-                    ),
-                    None,
-                )
-
-                output.append("")
-                output.append(f"Device: {thing.get('name', 'N/A')}")
-                output.append(f"  - Thing ID: {thing.get('id', 'N/A')}")
-                output.append(f"  - Thing Class ID: {thing.get('thingClassId', 'N/A')}")
-
-                if thing_class:
-                    vendor = vendor_map.get(thing_class.get("vendorId"), {})
-                    output.append(
-                        f"  - Thing Class: {thing_class.get('displayName', 'N/A')}"
-                    )
-                    output.append(f"  - Vendor: {vendor.get('displayName', 'Unknown')}")
-
-                states_response = await loop.run_in_executor(
-                    None,
-                    self.send_command,
-                    "Integrations.GetStateValues",
-                    {"thingId": thing.get("id")},
-                )
-
-                if states_response:
-                    values = states_response.get("params", {}).get("values", [])
-                    if values:
-                        output.append("  - Current States:")
-                        for state_value in values:
-                            state_type_id = state_value.get("stateTypeId")
-                            value = state_value.get("value")
-
-                            state_type_name = "Unknown"
-                            if thing_class:
-                                state_types = thing_class.get("stateTypes", [])
-                                state_type = next(
-                                    (
-                                        st
-                                        for st in state_types
-                                        if st["id"] == state_type_id
-                                    ),
-                                    None,
-                                )
-                                if state_type:
-                                    state_type_name = state_type.get(
-                                        "displayName", "Unknown"
-                                    )
-
-                            output.append(f"      * {state_type_name}: {value}")
-
-            output.append("")
-            output.append("=" * 80)
-            output.append("NYMEA DISCOVERY COMPLETE")
-            output.append("=" * 80)
-
-            _LOGGER.info("Nymea Discovery Results:\n%s", "\n".join(output))
-
-        except Exception:
-            _LOGGER.exception("Error during Nymea discovery")
+        _LOGGER.debug(
+            "Nymea discovery snapshot: %d vendors, %d thing classes, %d things",
+            len(self.vendors),
+            len(self.thing_classes),
+            len(self.discovered_things),
+        )

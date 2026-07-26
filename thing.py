@@ -24,6 +24,7 @@ class Thing:
         name: str,
         maveoBox: MaveoBox,
         model: str | None = None,
+        states: list[dict[str, Any]] | None = None,
     ) -> None:
         """Init sensor."""
         self._id: str = thingid
@@ -35,7 +36,11 @@ class Thing:
         self._callbacks: set[Callable[[], None]] = set()
 
         # Cache for state values - maps stateTypeId to value.
-        self._state_cache: dict[str, Any] = {}
+        self._state_cache = {
+            state["stateTypeId"]: state.get("value")
+            for state in states or []
+            if state.get("stateTypeId")
+        }
 
         # Register for state change notifications.
         self._register_for_notifications()
@@ -104,29 +109,29 @@ class Thing:
 
     @staticmethod
     async def add(maveoBox: MaveoBox):
-        """Add all things connected to the maveo box."""
-        things = maveoBox.send_command("Integrations.GetThings")["params"]["things"]
+        """Add all things from the shared discovery snapshot."""
+        thing_classes = {
+            item["id"]: item for item in maveoBox.thing_classes if item.get("id")
+        }
 
-        for thing in things:
-            params = {}
-            params["thingClassIds"] = [thing["thingClassId"]]
-            thingClasses = maveoBox.send_command(
-                "Integrations.GetThingClasses", params
-            )["params"]["thingClasses"]
-
-            vendors = maveoBox.send_command("Integrations.GetVendors")["params"][
-                "vendors"
-            ]
-
-            vendor = next(x for x in vendors if x["id"] == thingClasses[0]["vendorId"])
-
+        for thing in maveoBox.discovered_things:
+            thing_class = thing_classes.get(thing.get("thingClassId"))
+            if thing_class is None:
+                _LOGGER.warning(
+                    "Skipping thing %s with unknown thing class %s",
+                    thing.get("id"),
+                    thing.get("thingClassId"),
+                )
+                continue
+            vendor = maveoBox.vendors.get(thing_class.get("vendorId"), {})
             maveoBox.things.append(
                 Thing(
                     thing["id"],
                     thing["thingClassId"],
-                    vendor["displayName"],
+                    vendor.get("displayName", "Unknown"),
                     thing["name"],
                     maveoBox,
-                    thingClasses[0].get("displayName"),
+                    thing_class.get("displayName"),
+                    thing.get("states", []),
                 )
             )

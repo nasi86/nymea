@@ -47,8 +47,10 @@ def mock_maveo_box():
         box_instance.send_command = MagicMock(
             return_value={"params": {"value": "test"}}
         )
+        box_instance.discover_and_log_all_things = AsyncMock()
         box_instance.start_notification_listener = MagicMock()
         box_instance.stop_notification_listener = AsyncMock()
+        box_instance.async_close = AsyncMock()
         box_instance.maveoSticks = []
         box_instance.things = []
         box_instance.online = True
